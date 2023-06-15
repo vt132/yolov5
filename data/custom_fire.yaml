@@ -1,0 +1,14 @@
+path: .../dataset/Custom
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 7
+names: ['cloud', 'fire', 'lighting', 'smoke', 'steam', 'sun', 'tornado']
+
+roboflow:
+  workspace: thesis-hmo2v
+  project: fire-detection-zs8op
+  version: 1
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/thesis-hmo2v/fire-detection-zs8op/dataset/1

@@ -23,6 +23,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from torch.cuda import amp
+from torch.nn import MaxPool2d
 
 from utils import TryExcept
 from utils.dataloaders import exif_transpose, letterbox
