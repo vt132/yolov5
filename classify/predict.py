@@ -91,7 +91,8 @@ def run(
     model = DetectMultiBackend(weights, device=device, dnn=dnn, data=data, fp16=half)
     stride, names, pt = model.stride, model.names, model.pt
     imgsz = check_img_size(imgsz, s=stride)  # check image size
-
+    print(model)
+    feature_num = 3
     # Dataloader
     bs = 1  # batch_size
     if webcam:
@@ -139,7 +140,8 @@ def run(
             annotator = Annotator(im0, example=str(names), pil=True)
 
             # Print results
-            top5i = prob.argsort(0, descending=True)[:5].tolist()  # top 5 indices
+            max_class = max(feature_num, 5)
+            top5i = prob.argsort(0, descending=True)[:max_class].tolist()  # top 5 indices
             s += f"{', '.join(f'{names[j]} {prob[j]:.2f}' for j in top5i)}, "
 
             # Write results

@@ -21,6 +21,7 @@ import time
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+from sklearn.decomposition import FactorAnalysis
 
 import torch
 import torch.distributed as dist
@@ -29,6 +30,7 @@ import torch.optim.lr_scheduler as lr_scheduler
 import torchvision
 from torch.cuda import amp
 from tqdm import tqdm
+import timm 
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[1]  # YOLOv5 root directory
@@ -54,7 +56,10 @@ GIT_INFO = check_git_info()
 
 
 def train(opt, device):
-    init_seeds(opt.seed + 1 + RANK, deterministic=True)
+    if not opt.non_deterministic:
+        init_seeds(opt.seed + 1 + RANK, deterministic=True)
+    else:
+        init_seeds(opt.seed + 1 + RANK, deterministic=False)
     save_dir, data, bs, epochs, nw, imgsz, pretrained = \
         opt.save_dir, Path(opt.data), opt.batch_size, opt.epochs, min(os.cpu_count() - 1, opt.workers), \
         opt.imgsz, str(opt.pretrained).lower() == 'true'
@@ -84,7 +89,7 @@ def train(opt, device):
                 download(url, dir=data_dir.parent)
             s = f"Dataset download success ✅ ({time.time() - t:.1f}s), saved to {colorstr('bold', data_dir)}\n"
             LOGGER.info(s)
-
+    LOGGER.info("Creating dataloaders")
     # Dataloaders
     nc = len([x for x in (data_dir / 'train').glob('*') if x.is_dir()])  # number of classes
     trainloader = create_classification_dataloader(path=data_dir / 'train',
@@ -109,6 +114,8 @@ def train(opt, device):
     with torch_distributed_zero_first(LOCAL_RANK), WorkingDirectory(ROOT):
         if Path(opt.model).is_file() or opt.model.endswith('.pt'):
             model = attempt_load(opt.model, device='cpu', fuse=False)
+        elif timm.list_models(filter=opt.model): # timm models support
+            model = timm.create_model(opt.model, pretrained=True, num_classes=nc)
         elif opt.model in torchvision.models.__dict__:  # TorchVision models i.e. resnet50, efficientnet_b0
             model = torchvision.models.__dict__[opt.model](weights='IMAGENET1K_V1' if pretrained else None)
         else:
@@ -167,7 +174,7 @@ def train(opt, device):
                 f'Using {nw * WORLD_SIZE} dataloader workers\n'
                 f"Logging results to {colorstr('bold', save_dir)}\n"
                 f'Starting {opt.model} training on {data} dataset with {nc} classes for {epochs} epochs...\n\n'
-                f"{'Epoch':>10}{'GPU_mem':>10}{'train_loss':>12}{f'{val}_loss':>12}{'top1_acc':>12}{'top5_acc':>12}")
+                f"{'Epoch':>10}{'GPU_mem':>10}{'train_loss':>12}{f'{val}_loss':>12}{'top1_acc':>12}{'top5_acc':>12}{'precision':>12}{'recall':>12}")
     for epoch in range(epochs):  # loop over the dataset multiple times
         tloss, vloss, fitness = 0.0, 0.0, 0.0  # train loss, val loss, fitness
         model.train()
@@ -199,14 +206,16 @@ def train(opt, device):
                 # Print
                 tloss = (tloss * i + loss.item()) / (i + 1)  # update mean losses
                 mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
-                pbar.desc = f"{f'{epoch + 1}/{epochs}':>10}{mem:>10}{tloss:>12.3g}" + ' ' * 36
+                pbar.desc = f"{f'{epoch + 1}/{epochs}':>10}{mem:>10}{tloss:>12.3g}" + ' ' * 60
 
                 # Test
                 if i == len(pbar) - 1:  # last batch
-                    top1, top5, vloss = validate.run(model=ema.ema,
-                                                     dataloader=testloader,
-                                                     criterion=criterion,
-                                                     pbar=pbar)  # test accuracy, loss
+                    top1, top5, vloss, precision, recall = validate.run(
+                        model=ema.ema,
+                        dataloader=testloader,
+                        criterion=criterion,
+                        pbar=pbar,
+                    )  # test accuracy, loss
                     fitness = top1  # define fitness as top1 accuracy
 
         # Scheduler
@@ -224,6 +233,8 @@ def train(opt, device):
                 f'{val}/loss': vloss,
                 'metrics/accuracy_top1': top1,
                 'metrics/accuracy_top5': top5,
+                'metrics/precision': precision,
+                'metrics/recall': recall,
                 'lr/0': optimizer.param_groups[0]['lr']}  # learning rate
             logger.log_metrics(metrics, epoch)
 
@@ -292,6 +303,7 @@ def parse_opt(known=False):
     parser.add_argument('--verbose', action='store_true', help='Verbose mode')
     parser.add_argument('--seed', type=int, default=0, help='Global training seed')
     parser.add_argument('--local_rank', type=int, default=-1, help='Automatic DDP Multi-GPU argument, do not modify')
+    parser.add_argument('--non-deterministic', action='store_true', help='set deterministic if needed' )
     return parser.parse_known_args()[0] if known else parser.parse_args()
 
 

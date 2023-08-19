@@ -1,0 +1,7 @@
+path: .../dataset/FASDD_CV
+train: train-cls
+val: val-cls
+test: test-cls
+
+nc: 3
+names: ["fire", "smoke", none]

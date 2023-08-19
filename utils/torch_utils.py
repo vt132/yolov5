@@ -75,10 +75,10 @@ def reshape_classifier_output(model, n=1000):
             setattr(model, name, nn.Linear(m.in_features, n))
     elif isinstance(m, nn.Sequential):
         types = [type(x) for x in m]
-        if nn.Linear in types:
-            i = types.index(nn.Linear)  # nn.Linear index
-            if m[i].out_features != n:
-                m[i] = nn.Linear(m[i].in_features, n)
+        print(types)
+        if nn.Linear in types:  # nn.Linear index
+            if m[-1].out_features != n:
+                m[-1] = nn.Linear(m[-1].in_features, n)
         elif nn.Conv2d in types:
             i = types.index(nn.Conv2d)  # nn.Conv2d index
             if m[i].out_channels != n:

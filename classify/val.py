@@ -39,6 +39,7 @@ from utils.dataloaders import create_classification_dataloader
 from utils.general import (LOGGER, TQDM_BAR_FORMAT, Profile, check_img_size, check_requirements, colorstr,
                            increment_path, print_args)
 from utils.torch_utils import select_device, smart_inference_mode
+from sklearn.metrics import precision_score, recall_score
 
 
 @smart_inference_mode()
@@ -122,15 +123,21 @@ def run(
     acc = torch.stack((correct[:, 0], correct.max(1).values), dim=1)  # (top1, top5) accuracy
     top1, top5 = acc.mean(0).tolist()
 
+    # Calculate precision and recall
+    precision = precision_score(targets.cpu().numpy(), pred[:, 0].cpu().numpy(), average='macro')
+    recall = recall_score(targets.cpu().numpy(), pred[:, 0].cpu().numpy(), average='macro')
+
     if pbar:
-        pbar.desc = f'{pbar.desc[:-36]}{loss:>12.3g}{top1:>12.3g}{top5:>12.3g}'
+        pbar.desc = f'{pbar.desc[:-60]}{loss:>12.3g}{top1:>12.3g}{top5:>12.3g}{precision:>12.3g}{recall:>12.3g}'
     if verbose:  # all classes
-        LOGGER.info(f"{'Class':>24}{'Images':>12}{'top1_acc':>12}{'top5_acc':>12}")
-        LOGGER.info(f"{'all':>24}{targets.shape[0]:>12}{top1:>12.3g}{top5:>12.3g}")
+        LOGGER.info(f"{'Class':>24}{'Images':>12}{'top1_acc':>12}{'top5_acc':>12}{'Precision':>12}{'Recall':>12}")
+        LOGGER.info(f"{'all':>24}{targets.shape[0]:>12}{top1:>12.3g}{top5:>12.3g}{precision:>12.3g}{recall:>12.3g}")
         for i, c in model.names.items():
             acc_i = acc[targets == i]
             top1i, top5i = acc_i.mean(0).tolist()
-            LOGGER.info(f'{c:>24}{acc_i.shape[0]:>12}{top1i:>12.3g}{top5i:>12.3g}')
+            precision_i = precision_score((targets == i).cpu().numpy(), (pred[:, 0] == i).cpu().numpy())
+            recall_i = recall_score((targets == i).cpu().numpy(), (pred[:, 0] == i).cpu().numpy())
+            LOGGER.info(f'{c:>24}{acc_i.shape[0]:>12}{top1i:>12.3g}{top5i:>12.3g}{precision_i:>12.3g}{recall_i:>12.3g}')
 
         # Print results
         t = tuple(x.t / len(dataloader.dataset.samples) * 1E3 for x in dt)  # speeds per image
@@ -138,7 +145,8 @@ def run(
         LOGGER.info(f'Speed: %.1fms pre-process, %.1fms inference, %.1fms post-process per image at shape {shape}' % t)
         LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}")
 
-    return top1, top5, loss
+    return top1, top5, loss, precision, recall
+
 
 
 def parse_opt():

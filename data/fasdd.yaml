@@ -1,0 +1,7 @@
+path: .../dataset/FASDD_CV
+train: train-det/images
+val: val-det/images
+test: test-det/images
+
+nc: 2
+names: ["fire", "smoke"]
