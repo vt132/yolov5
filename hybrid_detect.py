@@ -37,7 +37,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 from torchvision.transforms import v2
-
+import time
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLOv5 root directory
 if str(ROOT) not in sys.path:
@@ -123,6 +123,7 @@ def run(
     d_model.warmup(imgsz=(1 if pt or d_model.triton else bs, 3, *imgsz))  # warmup
     seen, windows, dt = 0, [], (Profile(), Profile(), Profile())
     for path, im, im0s, vid_cap, s in dataset:
+        start_time = time.time()
         with dt[0]:
             im = torch.from_numpy(im).to(d_model.device)
             im = im.half() if d_model.fp16 else im.float()  # uint8 to fp16/32
@@ -226,7 +227,8 @@ def run(
                         save_path = str(Path(save_path).with_suffix('.mp4'))  # force *.mp4 suffix on results videos
                         vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
                     vid_writer[i].write(im0)
-
+        end_time = time.time()
+        LOGGER.info(f"Execution time: {end_time - start_time} s")
         # Print time (inference-only)
         LOGGER.info(f"{s}{'' if len(det) else '(no detections), '}{dt[1].dt * 1E3:.1f}ms")
 
