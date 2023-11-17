@@ -76,7 +76,7 @@ def run(
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
     is_file = Path(source).suffix[1:] in (IMG_FORMATS + VID_FORMATS)
-    is_url = source.lower().startswith(('rtsp://', 'rtmp://', 'http://', 'https://'))
+    is_url = source.lower().startswith(('rtsp://', 'rtmp://', 'http://', 'https://', 'tcp://'))
     webcam = source.isnumeric() or source.endswith('.streams') or (is_url and not is_file)
     screenshot = source.lower().startswith('screen')
     if is_url and is_file:
@@ -91,8 +91,7 @@ def run(
     model = DetectMultiBackend(weights, device=device, dnn=dnn, data=data, fp16=half)
     stride, names, pt = model.stride, model.names, model.pt
     imgsz = check_img_size(imgsz, s=stride)  # check image size
-    print(model)
-    feature_num = 3
+    class_num = 3
     # Dataloader
     bs = 1  # batch_size
     if webcam:
@@ -140,7 +139,7 @@ def run(
             annotator = Annotator(im0, example=str(names), pil=True)
 
             # Print results
-            max_class = max(feature_num, 5)
+            max_class = max(class_num, 5)
             top5i = prob.argsort(0, descending=True)[:max_class].tolist()  # top 5 indices
             s += f"{', '.join(f'{names[j]} {prob[j]:.2f}' for j in top5i)}, "
 

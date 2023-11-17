@@ -5,4 +5,34 @@ val: val # val images (relative to 'path')
 
 # Classes
 nc: 36 # number of classes
-names: ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z']  # class names
+names:
+  0: 1
+  1: 2
+  2: 3
+  3: 4
+  4: 5
+  5: 6
+  6: 7
+  7: 8
+  8: 9
+  9: A
+  10: B
+  11: C
+  12: D
+  13: E
+  14: F
+  15: G
+  16: H
+  17: K
+  18: L
+  19: M
+  20: N
+  21: P
+  22: S
+  23: T
+  24: U
+  25: V
+  26: X
+  27: Y
+  28: Z
+  29: 0

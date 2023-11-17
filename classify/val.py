@@ -89,7 +89,7 @@ def run(
 
         # Dataloader
         data = Path(data)
-        test_dir = data / 'test' if (data / 'test').exists() else data / 'val'  # data/test or data/val
+        test_dir = data / 'val' if (data / 'val').exists() else data / 'test'  # data/test or data/val
         dataloader = create_classification_dataloader(path=test_dir,
                                                       imgsz=imgsz,
                                                       batch_size=batch_size,

@@ -3,7 +3,7 @@
 Run YOLOv5 detection inference on images, videos, directories, globs, YouTube, webcam, streams, etc.
 
 Usage - sources:
-    $ python detect.py --weights yolov5s.pt --source 0                               # webcam
+    $ python detect.py --d_weights yolov5s.pt --source 0                               # webcam
                                                      img.jpg                         # image
                                                      vid.mp4                         # video
                                                      screen                          # screenshot
@@ -15,7 +15,7 @@ Usage - sources:
                                                      'rtsp://example.com/media.mp4'  # RTSP, RTMP, HTTP stream
 
 Usage - formats:
-    $ python detect.py --weights yolov5s.pt                 # PyTorch
+    $ python detect.py --d_weights yolov5s.pt                 # PyTorch
                                  yolov5s.torchscript        # TorchScript
                                  yolov5s.onnx               # ONNX Runtime or OpenCV DNN with --dnn
                                  yolov5s_openvino_model     # OpenVINO
@@ -35,6 +35,8 @@ import sys
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
+from torchvision.transforms import v2
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLOv5 root directory
@@ -49,14 +51,17 @@ from utils.dataloaders import IMG_FORMATS, VID_FORMATS, LoadImages, LoadScreensh
 from utils.general import (LOGGER, Profile, check_file, check_img_size, check_imshow, check_requirements, colorstr, cv2,
                            increment_path, non_max_suppression, print_args, scale_boxes, strip_optimizer, xyxy2xywh)
 from utils.torch_utils import select_device, smart_inference_mode
+from utils.augmentations import classify_transforms
 
 
 @smart_inference_mode()
 def run(
-        weights=ROOT / 'yolov5s.pt',  # model path or triton URL
+        d_weights=ROOT / 'yolov5s.pt',  # model path or triton URL
+        c_weights=ROOT / 'yolov5s-cls.pt',
         source=ROOT / 'data/images',  # file/dir/URL/glob/screen/0(webcam)
         data=ROOT / 'data/coco128.yaml',  # dataset.yaml path
         imgsz=(640, 640),  # inference size (height, width)
+        c_imgsz=(224, 224),  # classification inference size (height, width)
         conf_thres=0.25,  # confidence threshold
         iou_thres=0.45,  # NMS IOU threshold
         max_det=1000,  # maximum detections per image
@@ -89,15 +94,17 @@ def run(
     screenshot = source.lower().startswith('screen')
     if is_url and is_file:
         source = check_file(source)  # download
-
+    resize = classify_transforms(224)
     # Directories
     save_dir = increment_path(Path(project) / name, exist_ok=exist_ok)  # increment run
     (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
 
     # Load model
     device = select_device(device)
-    model = DetectMultiBackend(weights, device=device, dnn=dnn, data=data, fp16=half)
-    stride, names, pt = model.stride, model.names, model.pt
+    d_model = DetectMultiBackend(d_weights, device=device, dnn=dnn, data=data, fp16=half)
+    c_model = DetectMultiBackend(c_weights, device=device, dnn=dnn, data=data, fp16=half)
+    stride, names, pt = d_model.stride, d_model.names, d_model.pt
+    c_names = c_model.names
     imgsz = check_img_size(imgsz, s=stride)  # check image size
 
     # Dataloader
@@ -113,12 +120,12 @@ def run(
     vid_path, vid_writer = [None] * bs, [None] * bs
 
     # Run inference
-    model.warmup(imgsz=(1 if pt or model.triton else bs, 3, *imgsz))  # warmup
+    d_model.warmup(imgsz=(1 if pt or d_model.triton else bs, 3, *imgsz))  # warmup
     seen, windows, dt = 0, [], (Profile(), Profile(), Profile())
     for path, im, im0s, vid_cap, s in dataset:
         with dt[0]:
-            im = torch.from_numpy(im).to(model.device)
-            im = im.half() if model.fp16 else im.float()  # uint8 to fp16/32
+            im = torch.from_numpy(im).to(d_model.device)
+            im = im.half() if d_model.fp16 else im.float()  # uint8 to fp16/32
             im /= 255  # 0 - 255 to 0.0 - 1.0
             if len(im.shape) == 3:
                 im = im[None]  # expand for batch dim
@@ -126,7 +133,7 @@ def run(
         # Inference
         with dt[1]:
             visualize = increment_path(save_dir / Path(path).stem, mkdir=True) if visualize else False
-            pred = model(im, augment=augment, visualize=visualize)
+            pred = d_model(im, augment=augment, visualize=visualize)
 
         # NMS
         with dt[2]:
@@ -154,6 +161,7 @@ def run(
             if len(det):
                 # Rescale boxes from img_size to im0 size
                 det[:, :4] = scale_boxes(im.shape[2:], det[:, :4], im0.shape).round()
+                s_class = []
 
                 # Print results
                 for c in det[:, 5].unique():
@@ -162,6 +170,20 @@ def run(
 
                 # Write results
                 for *xyxy, conf, cls in reversed(det):
+                    # Crop and preprocess image
+                    int_xyxy = [int(i) for i in xyxy]  # Convert the tensor to int
+                    crop = resize(im0[int_xyxy[1]:int_xyxy[3], int_xyxy[0]:int_xyxy[2]]).to(device)  # Crop imageq
+                    output = c_model(crop.unsqueeze(0).float())  # Forward pass through classification model
+                    pred_class = F.softmax(output, dim=1)
+                    for i, prob in enumerate(pred_class):
+                        class_num = 3
+                        top5i = prob.argsort(0, descending=True)[:class_num].tolist()  # top 5 indices
+                        LOGGER.info(f"{', '.join(f'{c_names[j]} {prob[j]:.2f}' for j in top5i)}")
+                    # Now you can use `pred_class` for further processing or add it to the label
+                    # TODO: log all pred_class out
+
+                    s_class += pred_class
+                    
                     if save_txt:  # Write to file
                         xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
                         line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # label format
@@ -174,6 +196,7 @@ def run(
                         annotator.box_label(xyxy, label, color=colors(c, True))
                     if save_crop:
                         save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
+                LOGGER.info(f"{s_class}")
 
             # Stream results
             im0 = annotator.result()
@@ -214,15 +237,17 @@ def run(
         s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
         LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}{s}")
     if update:
-        strip_optimizer(weights[0])  # update model (to fix SourceChangeWarning)
+        strip_optimizer(d_weights[0])  # update model (to fix SourceChangeWarning)
 
 
 def parse_opt():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', nargs='+', type=str, default=ROOT / 'yolov5s.pt', help='model path or triton URL')
+    parser.add_argument('--d-weights', nargs='+', type=str, default=ROOT / 'yolov5s.pt', help='detection model path or triton URL')
+    parser.add_argument('--c-weights', nargs='+', type=str, default=ROOT / 'yolov5s-cls.pt', help='classificaton model path or triton URL')
     parser.add_argument('--source', type=str, default=ROOT / 'data/images', help='file/dir/URL/glob/screen/0(webcam)')
     parser.add_argument('--data', type=str, default=ROOT / 'data/coco128.yaml', help='(optional) dataset.yaml path')
     parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[640], help='inference size h,w')
+    parser.add_argument('--c-imgsz', '--c-img', '--c-img-size', nargs='+', type=int, default=[224], help='inference size h,w')
     parser.add_argument('--conf-thres', type=float, default=0.25, help='confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.45, help='NMS IoU threshold')
     parser.add_argument('--max-det', type=int, default=1000, help='maximum detections per image')
