@@ -33,10 +33,12 @@ import os
 import platform
 import sys
 from pathlib import Path
+import numpy as np
+from collections import Counter
+from datetime import datetime, timedelta
 
 import torch
-import torch.nn.functional as F
-from torchvision.transforms import v2
+
 import time
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLOv5 root directory
@@ -49,9 +51,42 @@ from ultralytics.utils.plotting import Annotator, colors, save_one_box
 from models.common import DetectMultiBackend
 from utils.dataloaders import IMG_FORMATS, VID_FORMATS, LoadImages, LoadScreenshots, LoadStreams
 from utils.general import (LOGGER, Profile, check_file, check_img_size, check_imshow, check_requirements, colorstr, cv2,
-                           increment_path, non_max_suppression, print_args, scale_boxes, strip_optimizer, xyxy2xywh)
+                           increment_path, non_max_suppression, print_args, scale_boxes, strip_optimizer, xyxy2xywh, xywh2xyxy)
 from utils.torch_utils import select_device, smart_inference_mode
-from utils.augmentations import classify_transforms
+
+def apply_classifier(x, model, img, im0):
+    # Apply a second stage classifier to YOLO outputs
+    im0 = [im0] if isinstance(im0, np.ndarray) else im0
+    for i, d in enumerate(x):  # per image
+        if d is not None and len(d):
+            d = d.clone()
+
+            # Reshape and pad cutouts
+            b = xyxy2xywh(d[:, :4])  # boxes
+            b[:, 2:] = b[:, 2:].max(1)[0].unsqueeze(1)  # rectangle to square
+            b[:, 2:] = b[:, 2:] * 1.3 + 30  # pad
+            d[:, :4] = xywh2xyxy(b).long()
+
+            # Rescale boxes from img_size to im0 size
+            scale_boxes(img.shape[2:], d[:, :4], im0[i].shape)
+
+            # Classes
+            pred_cls1 = d[:, 5].long()
+            pred_cls2 = []
+            for a in d:
+                cutout = im0[i][int(a[1]):int(a[3]), int(a[0]):int(a[2])]
+                im = cv2.resize(cutout, (224, 224))  # BGR
+
+                im = im[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
+                im = np.ascontiguousarray(im, dtype=np.float32)  # uint8 to float32
+                im /= 255  # 0 - 255 to 0.0 - 1.0
+                pred = model(torch.Tensor(im).unsqueeze(0).to(d.device)).argmax(1)  # classifier prediction
+                pred_cls2.append(pred)
+
+            pred_cls2 = torch.cat(pred_cls2)
+            x[i] = x[i][pred_cls1 == pred_cls2]  # retain matching class detections
+
+    return x
 
 
 @smart_inference_mode()
@@ -94,7 +129,6 @@ def run(
     screenshot = source.lower().startswith('screen')
     if is_url and is_file:
         source = check_file(source)  # download
-    resize = classify_transforms(224)
     # Directories
     save_dir = increment_path(Path(project) / name, exist_ok=exist_ok)  # increment run
     (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
@@ -104,9 +138,9 @@ def run(
     d_model = DetectMultiBackend(d_weights, device=device, dnn=dnn, data=data, fp16=half)
     c_model = DetectMultiBackend(c_weights, device=device, dnn=dnn, data=data, fp16=half)
     stride, names, pt = d_model.stride, d_model.names, d_model.pt
-    c_names = c_model.names
     imgsz = check_img_size(imgsz, s=stride)  # check image size
-
+    detections = []
+    first_detection_time = None
     # Dataloader
     bs = 1  # batch_size
     if webcam:
@@ -141,8 +175,38 @@ def run(
             pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
 
         # Second-stage classifier (optional)
-        # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
+        pred = apply_classifier(pred, c_model, im, im0s)
+        if pred:
+            if any((det[:, 5] == 0).any() for det in pred if det.numel() > 0):
+                detections.append('fire')
+                if first_detection_time is None:
+                    first_detection_time = datetime.now()
+            elif any((det[:, 5] == 1).any() for det in pred if det.numel() > 0):
+                detections.append('smoke')
+                if first_detection_time is None:
+                    first_detection_time = datetime.now()
+        else:
+            detections.append('none')
 
+        # If 10 seconds have passed since the first detection, evaluate the detections
+        if first_detection_time is not None and datetime.now() - first_detection_time >= timedelta(seconds=3):
+            # Count the occurrences of each result
+            counter = Counter(detections)
+
+            # Find the result with the most occurrences
+            most_common_result = counter.most_common(1)[0]
+
+            # Print a message to announce the result
+            if most_common_result[0] == 'fire':
+                LOGGER.info("Fire scenario detected!")
+            elif most_common_result[0] == 'smoke':
+                LOGGER.info("Smoke scenario detected!")
+            else:
+                LOGGER.info("No fire or smoke detected.")
+
+            # Reset the first detection time and clear the detections
+            first_detection_time = None
+            detections.clear()
         # Process predictions
         for i, det in enumerate(pred):  # per image
             seen += 1
@@ -162,8 +226,6 @@ def run(
             if len(det):
                 # Rescale boxes from img_size to im0 size
                 det[:, :4] = scale_boxes(im.shape[2:], det[:, :4], im0.shape).round()
-                s_class = []
-
                 # Print results
                 for c in det[:, 5].unique():
                     n = (det[:, 5] == c).sum()  # detections per class
@@ -172,19 +234,18 @@ def run(
                 # Write results
                 for *xyxy, conf, cls in reversed(det):
                     # Crop and preprocess image
-                    int_xyxy = [int(i) for i in xyxy]  # Convert the tensor to int
-                    crop = resize(im0[int_xyxy[1]:int_xyxy[3], int_xyxy[0]:int_xyxy[2]]).to(device)  # Crop imageq
-                    output = c_model(crop.unsqueeze(0).float())  # Forward pass through classification model
-                    pred_class = F.softmax(output, dim=1)
-                    for i, prob in enumerate(pred_class):
-                        class_num = 3
-                        top5i = prob.argsort(0, descending=True)[:class_num].tolist()  # top 5 indices
-                        LOGGER.info(f"{', '.join(f'{c_names[j]} {prob[j]:.2f}' for j in top5i)}")
+                    # int_xyxy = [int(i) for i in xyxy]  # Convert the tensor to int
+                    # crop = resize(im0[int_xyxy[1]:int_xyxy[3], int_xyxy[0]:int_xyxy[2]]).to(device)  # Crop imageq
+                    # output = c_model(crop.unsqueeze(0).float())  # Forward pass through classification model
+                    # pred_class = F.softmax(output, dim=1)
+                    # for i, prob in enumerate(pred_class):
+                    #     class_num = 3
+                    #     top5i = prob.argsort(0, descending=True)[:class_num].tolist()  # top 5 indices
+                    #     LOGGER.info(f"{', '.join(f'{c_names[j]} {prob[j]:.2f}' for j in top5i)}")
                     # Now you can use `pred_class` for further processing or add it to the label
                     # TODO: log all pred_class out
 
-                    s_class += pred_class
-                    
+                    # s_class += pred_class
                     if save_txt:  # Write to file
                         xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
                         line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # label format
@@ -197,7 +258,6 @@ def run(
                         annotator.box_label(xyxy, label, color=colors(c, True))
                     if save_crop:
                         save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
-                LOGGER.info(f"{s_class}")
 
             # Stream results
             im0 = annotator.result()
@@ -228,7 +288,7 @@ def run(
                         vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
                     vid_writer[i].write(im0)
         end_time = time.time()
-        LOGGER.info(f"Execution time: {end_time - start_time} s")
+        LOGGER.info(f"Execution time: {end_time - start_time}s")
         # Print time (inference-only)
         LOGGER.info(f"{s}{'' if len(det) else '(no detections), '}{dt[1].dt * 1E3:.1f}ms")
 
