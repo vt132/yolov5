@@ -71,8 +71,6 @@ def save_send_delete_image(image_array, chat_id, bot, image_path):
     # Delete the image file
     os.remove(image_path)
 
-import telepot
-
 
 def apply_classifier(x, model, img, im0):
     # Apply a second stage classifier to YOLO outputs
