@@ -37,7 +37,7 @@ import numpy as np
 from collections import Counter
 from datetime import datetime, timedelta
 import threading
-
+from PIL import Image
 import torch
 
 import time
@@ -54,12 +54,14 @@ from utils.dataloaders import IMG_FORMATS, VID_FORMATS, LoadImages, LoadScreensh
 from utils.general import (LOGGER, Profile, check_file, check_img_size, check_imshow, check_requirements, colorstr, cv2,
                            increment_path, non_max_suppression, print_args, scale_boxes, strip_optimizer, xyxy2xywh, xywh2xyxy)
 from utils.torch_utils import select_device, smart_inference_mode
-from PIL import Image
+
 import telepot
+
+
+
 
 def save_send_delete_image(image_array, chat_id, bot, image_path):
     output = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
-    print(output.shape)
     # Convert numpy array to image
     im_pil = Image.fromarray(output.astype(np.uint8))
     # Save image to disk
@@ -70,9 +72,6 @@ def save_send_delete_image(image_array, chat_id, bot, image_path):
 
     # Delete the image file
     os.remove(image_path)
-
-import telepot
-
 
 def apply_classifier(x, model, img, im0):
     # Apply a second stage classifier to YOLO outputs
@@ -86,8 +85,10 @@ def apply_classifier(x, model, img, im0):
             b[:, 2:] = b[:, 2:].max(1)[0].unsqueeze(1)  # rectangle to square
             b[:, 2:] = b[:, 2:] * 1.3 + 30  # pad
             d[:, :4] = xywh2xyxy(b).long()
+
             # Rescale boxes from img_size to im0 size
             scale_boxes(img.shape[2:], d[:, :4], im0[i].shape)
+
             # Classes
             pred_cls1 = d[:, 5].long()
             pred_cls2 = []
@@ -95,7 +96,7 @@ def apply_classifier(x, model, img, im0):
                 cutout = im0[i][int(a[1]):int(a[3]), int(a[0]):int(a[2])]
                 im = cv2.resize(cutout, (224, 224))  # BGR
 
-                im = im[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x224x224
+                im = im[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
                 im = np.ascontiguousarray(im, dtype=np.float32)  # uint8 to float32
                 im /= 255  # 0 - 255 to 0.0 - 1.0
                 pred = model(torch.Tensor(im).unsqueeze(0).to(d.device)).argmax(1)  # classifier prediction
@@ -143,7 +144,7 @@ def run(
         bot_token=None,
         chat_id=None,
 ):
-    bot = telepot.Bot(bot_token)
+    bot=telepot.Bot(bot_token)
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
     is_file = Path(source).suffix[1:] in (IMG_FORMATS + VID_FORMATS)
@@ -167,7 +168,6 @@ def run(
     # Dataloader
     bs = 1  # batch_size
     if webcam:
-        view_img = check_imshow(warn=True)
         dataset = LoadStreams(source, img_size=imgsz, stride=stride, auto=pt, vid_stride=vid_stride)
         bs = len(dataset)
     elif screenshot:
@@ -179,6 +179,9 @@ def run(
     # Run inference
     d_model.warmup(imgsz=(1 if pt or d_model.triton else bs, 3, *imgsz))  # warmup
     seen, windows, dt = 0, [], (Profile(), Profile(), Profile())
+    
+    send_message_thread = threading.Thread(target=bot.sendMessage, args=(chat_id, "System start"))
+    send_message_thread.start()
     for path, im, im0s, vid_cap, s in dataset:
         start_time = time.time()
         with dt[0]:
@@ -222,7 +225,7 @@ def run(
             if most_common_result[0] == 'fire':
                 send_message_thread = threading.Thread(target=bot.sendMessage, args=(chat_id, "Fire!!!"))
                 send_message_thread.start()
-                image_thread = threading.Thread(target=save_send_delete_image, args=((im0s[0] if webcam else im0s), chat_id, bot, 'output.png'))
+                image_thread = threading.Thread(target=save_send_delete_image, args=((im0s[0] if webcam else im0s), chat_id, bot, './hybrid-run/output.png'))
                 image_thread.start()
             else:
                 LOGGER.info("No fire or smoke detected.")
@@ -256,19 +259,6 @@ def run(
 
                 # Write results
                 for *xyxy, conf, cls in reversed(det):
-                    # Crop and preprocess image
-                    # int_xyxy = [int(i) for i in xyxy]  # Convert the tensor to int
-                    # crop = resize(im0[int_xyxy[1]:int_xyxy[3], int_xyxy[0]:int_xyxy[2]]).to(device)  # Crop imageq
-                    # output = c_model(crop.unsqueeze(0).float())  # Forward pass through classification model
-                    # pred_class = F.softmax(output, dim=1)
-                    # for i, prob in enumerate(pred_class):
-                    #     class_num = 3
-                    #     top5i = prob.argsort(0, descending=True)[:class_num].tolist()  # top 5 indices
-                    #     LOGGER.info(f"{', '.join(f'{c_names[j]} {prob[j]:.2f}' for j in top5i)}")
-                    # Now you can use `pred_class` for further processing or add it to the label
-                    # TODO: log all pred_class out
-
-                    # s_class += pred_class
                     if save_txt:  # Write to file
                         xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
                         line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # label format
