@@ -36,6 +36,7 @@ from pathlib import Path
 import numpy as np
 from collections import Counter
 from datetime import datetime, timedelta
+import threading
 
 import torch
 
@@ -53,6 +54,22 @@ from utils.dataloaders import IMG_FORMATS, VID_FORMATS, LoadImages, LoadScreensh
 from utils.general import (LOGGER, Profile, check_file, check_img_size, check_imshow, check_requirements, colorstr, cv2,
                            increment_path, non_max_suppression, print_args, scale_boxes, strip_optimizer, xyxy2xywh, xywh2xyxy)
 from utils.torch_utils import select_device, smart_inference_mode
+from PIL import Image
+import telepot
+
+def save_send_delete_image(image_array, chat_id, bot, image_path):
+    output = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
+    print(output.shape)
+    # Convert numpy array to image
+    im_pil = Image.fromarray(output.astype(np.uint8))
+    # Save image to disk
+    im_pil.save(image_path, format='PNG')
+    # Send image
+    with open(image_path, 'rb') as img_file:
+        bot.sendPhoto(chat_id, img_file)
+
+    # Delete the image file
+    os.remove(image_path)
 
 def apply_classifier(x, model, img, im0):
     # Apply a second stage classifier to YOLO outputs
@@ -66,10 +83,8 @@ def apply_classifier(x, model, img, im0):
             b[:, 2:] = b[:, 2:].max(1)[0].unsqueeze(1)  # rectangle to square
             b[:, 2:] = b[:, 2:] * 1.3 + 30  # pad
             d[:, :4] = xywh2xyxy(b).long()
-
             # Rescale boxes from img_size to im0 size
             scale_boxes(img.shape[2:], d[:, :4], im0[i].shape)
-
             # Classes
             pred_cls1 = d[:, 5].long()
             pred_cls2 = []
@@ -77,10 +92,12 @@ def apply_classifier(x, model, img, im0):
                 cutout = im0[i][int(a[1]):int(a[3]), int(a[0]):int(a[2])]
                 im = cv2.resize(cutout, (224, 224))  # BGR
 
-                im = im[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
+                im = im[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x224x224
                 im = np.ascontiguousarray(im, dtype=np.float32)  # uint8 to float32
                 im /= 255  # 0 - 255 to 0.0 - 1.0
                 pred = model(torch.Tensor(im).unsqueeze(0).to(d.device)).argmax(1)  # classifier prediction
+                if pred.item() in [0, 1]:  # change to adapt single-cls detection
+                    pred = torch.tensor([0]).to(d.device)
                 pred_cls2.append(pred)
 
             pred_cls2 = torch.cat(pred_cls2)
@@ -120,7 +137,10 @@ def run(
         half=False,  # use FP16 half-precision inference
         dnn=False,  # use OpenCV DNN for ONNX inference
         vid_stride=1,  # video frame-rate stride
+        bot_token=None,
+        chat_id=None,
 ):
+    bot = telepot.Bot(bot_token)
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
     is_file = Path(source).suffix[1:] in (IMG_FORMATS + VID_FORMATS)
@@ -176,20 +196,19 @@ def run(
 
         # Second-stage classifier (optional)
         pred = apply_classifier(pred, c_model, im, im0s)
-        if pred:
-            if any((det[:, 5] == 0).any() for det in pred if det.numel() > 0):
-                detections.append('fire')
-                if first_detection_time is None:
-                    first_detection_time = datetime.now()
-            elif any((det[:, 5] == 1).any() for det in pred if det.numel() > 0):
-                detections.append('smoke')
-                if first_detection_time is None:
-                    first_detection_time = datetime.now()
+        if any((det[:, 5] == 0).any() for det in pred if det.numel() > 0):
+            detections.append('fire')
+            if first_detection_time is None:
+                first_detection_time = datetime.now()
+        elif any((det[:, 5] == 1).any() for det in pred if det.numel() > 0):
+            detections.append('smoke')
+            if first_detection_time is None:
+                first_detection_time = datetime.now()
         else:
             detections.append('none')
 
         # If 10 seconds have passed since the first detection, evaluate the detections
-        if first_detection_time is not None and datetime.now() - first_detection_time >= timedelta(seconds=3):
+        if first_detection_time is not None and datetime.now() - first_detection_time >= timedelta(seconds=10):
             # Count the occurrences of each result
             counter = Counter(detections)
 
@@ -198,9 +217,10 @@ def run(
 
             # Print a message to announce the result
             if most_common_result[0] == 'fire':
-                LOGGER.info("Fire scenario detected!")
-            elif most_common_result[0] == 'smoke':
-                LOGGER.info("Smoke scenario detected!")
+                send_message_thread = threading.Thread(target=bot.sendMessage, args=(chat_id, "Fire!!!"))
+                send_message_thread.start()
+                image_thread = threading.Thread(target=save_send_delete_image, args=((im0s[0] if webcam else im0s), chat_id, bot, 'output.png'))
+                image_thread.start()
             else:
                 LOGGER.info("No fire or smoke detected.")
 
@@ -333,6 +353,8 @@ def parse_opt():
     parser.add_argument('--half', action='store_true', help='use FP16 half-precision inference')
     parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
     parser.add_argument('--vid-stride', type=int, default=1, help='video frame-rate stride')
+    parser.add_argument('--bot-token', required=True, type=str, help='Telegram bot token')
+    parser.add_argument('--chat-id', required=True, type=int, help='Chat ID to send the images')
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
     print_args(vars(opt))
@@ -341,7 +363,11 @@ def parse_opt():
 
 def main(opt):
     check_requirements(ROOT / 'requirements.txt', exclude=('tensorboard', 'thop'))
-    run(**vars(opt))
+    bot = telepot.Bot(opt.bot_token)
+    try:
+        run(**vars(opt))
+    finally:
+        bot.sendMessage(opt.chat_id, "System down")
 
 
 if __name__ == '__main__':
