@@ -39,6 +39,7 @@ from datetime import datetime, timedelta
 import threading
 from PIL import Image
 import torch
+from collections import deque
 
 import time
 FILE = Path(__file__).resolve()
@@ -163,7 +164,7 @@ def run(
     c_model = DetectMultiBackend(c_weights, device=device, dnn=dnn, data=data, fp16=half)
     stride, names, pt = d_model.stride, d_model.names, d_model.pt
     imgsz = check_img_size(imgsz, s=stride)  # check image size
-    detections = []
+    detections = deque()
     first_detection_time = None
     # Dataloader
     bs = 1  # batch_size
@@ -204,35 +205,21 @@ def run(
         pred = apply_classifier(pred, c_model, im, im0s)
         if any((det[:, 5] == 0).any() for det in pred if det.numel() > 0):
             detections.append('fire')
-            if first_detection_time is None:
-                first_detection_time = datetime.now()
-        elif any((det[:, 5] == 1).any() for det in pred if det.numel() > 0):
-            detections.append('smoke')
-            if first_detection_time is None:
-                first_detection_time = datetime.now()
         else:
             detections.append('none')
-
-        # If 10 seconds have passed since the first detection, evaluate the detections
-        if first_detection_time is not None and datetime.now() - first_detection_time >= timedelta(seconds=10):
-            # Count the occurrences of each result
-            counter = Counter(detections)
-
-            # Find the result with the most occurrences
-            most_common_result = counter.most_common(1)[0]
-
-            # Print a message to announce the result
-            if most_common_result[0] == 'fire':
-                send_message_thread = threading.Thread(target=bot.sendMessage, args=(chat_id, "Fire!!!"))
-                send_message_thread.start()
-                image_thread = threading.Thread(target=save_send_delete_image, args=((im0s[0] if webcam else im0s), chat_id, bot, './hybrid-run/output.png'))
-                image_thread.start()
-            else:
-                LOGGER.info("No fire or smoke detected.")
-
-            # Reset the first detection time and clear the detections
-            first_detection_time = None
+		# check queue has 10 results, pop least recent result
+        if len(detections) > 10:
+            detections.popleft()
+        counter = Counter(detections)
+		# raise alarm if 5 in x (x>=5) results 
+        if counter["fire"] >= 5:
+            send_message_thread = threading.Thread(target=bot.sendMessage, args=(chat_id, "Fire!!!"))
+            send_message_thread.start()
+            image_thread = threading.Thread(target=save_send_delete_image, args=((im0s[0] if webcam else im0s), chat_id, bot, './hybrid-run/output.png'))
+            image_thread.start()
             detections.clear()
+        else:
+            LOGGER.info("No fire or smoke detected.")
         # Process predictions
         for i, det in enumerate(pred):  # per image
             seen += 1
