@@ -40,6 +40,7 @@ import threading
 from PIL import Image
 import torch
 from collections import deque
+from contextlib import contextmanager
 
 import time
 FILE = Path(__file__).resolve()
@@ -60,19 +61,22 @@ import telepot
 
 
 
-
-def save_send_delete_image(image_array, chat_id, bot, image_path):
-    output = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
-    # Convert numpy array to image
-    im_pil = Image.fromarray(output.astype(np.uint8))
-    # Save image to disk
-    im_pil.save(image_path, format='PNG')
-    # Send image
-    with open(image_path, 'rb') as img_file:
-        bot.sendPhoto(chat_id, img_file)
-
-    # Delete the image file
-    os.remove(image_path)
+@contextmanager
+def save_send_delete_image(image_array, chat_id, bot, image_path, lock):
+    if lock.acquire(timeout=1):
+        try:    
+            output = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
+            # Convert numpy array to image
+            im_pil = Image.fromarray(output.astype(np.uint8))
+            # Save image to disk
+            im_pil.save(image_path, format='PNG')            
+            # Send image
+            with open(image_path, 'rb') as img_file:
+                bot.sendPhoto(chat_id, img_file)
+            # Delete the image file
+            os.remove(image_path)
+        finally:
+            lock.release()
 
 def apply_classifier(x, model, img, im0):
     # Apply a second stage classifier to YOLO outputs
@@ -100,7 +104,10 @@ def apply_classifier(x, model, img, im0):
                 im = im[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
                 im = np.ascontiguousarray(im, dtype=np.float32)  # uint8 to float32
                 im /= 255  # 0 - 255 to 0.0 - 1.0
-                pred = model(torch.Tensor(im).unsqueeze(0).to(d.device)).argmax(1)  # classifier prediction
+                im = torch.Tensor(im).unsqueeze(0).to(d.device)
+                min_val, max_val = torch.min(im), torch.max(im)
+                im = (im - min_val) / (max_val - min_val)
+                pred = model(im).argmax(1)  # classifier prediction
                 if pred.item() in [0, 1]:  # change to adapt single-cls detection
                     pred = torch.tensor([0]).to(d.device)
                 pred_cls2.append(pred)
@@ -145,6 +152,7 @@ def run(
         bot_token=None,
         chat_id=None,
 ):
+    lock = threading.Lock()
     bot=telepot.Bot(bot_token)
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
@@ -191,7 +199,8 @@ def run(
             im /= 255  # 0 - 255 to 0.0 - 1.0
             if len(im.shape) == 3:
                 im = im[None]  # expand for batch dim
-
+        min_val, max_val = torch.min(im), torch.max(im)
+        im = (im - min_val) / (max_val - min_val)
         # Inference
         with dt[1]:
             visualize = increment_path(save_dir / Path(path).stem, mkdir=True) if visualize else False
@@ -207,19 +216,18 @@ def run(
             detections.append('fire')
         else:
             detections.append('none')
-		# check queue has 10 results, pop least recent result
-        if len(detections) > 10:
+		# check queue has 11 results, pop least recent result
+        if len(detections) > 11:
             detections.popleft()
         counter = Counter(detections)
 		# raise alarm if 5 in x (x>=5) results 
-        if counter["fire"] >= 5:
-            send_message_thread = threading.Thread(target=bot.sendMessage, args=(chat_id, "Fire!!!"))
+        if counter["fire"] >= 6:
+            LOGGER.info("Fire detected")
+            send_message_thread = threading.Thread(target=bot.sendMessage, args=(chat_id, "Fire detected!!!"))
             send_message_thread.start()
-            image_thread = threading.Thread(target=save_send_delete_image, args=((im0s[0] if webcam else im0s), chat_id, bot, './hybrid-run/output.png'))
+            image_thread = threading.Thread(target=save_send_delete_image, args=((im0s[0] if webcam else im0s), chat_id, bot, 'output.png', lock))
             image_thread.start()
             detections.clear()
-        else:
-            LOGGER.info("No fire or smoke detected.")
         # Process predictions
         for i, det in enumerate(pred):  # per image
             seen += 1
